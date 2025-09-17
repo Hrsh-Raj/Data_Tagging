@@ -1,0 +1,64 @@
+import pickle 
+from typing import Dict, List
+from pydantic import BaseModel
+import numpy as np
+import os
+import time
+import pandas as pd
+from flask import Flask, render_template, request, jsonify
+import pyodbc
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+import requests
+import json
+from requests_ntlm import HttpNtlmAuth
+
+app = Flask(__name__)
+
+class FilterRequest(BaseModel):
+	playbook_id: str
+	no_of_records: int
+	scenario_names: List[str]
+	
+@app.post("/mem_data_tagging")
+def retrieve_features(request: FilterRequest):
+	
+	predicted_result = pd.read_excel("predicted_result.xlsx")
+	
+	scenarios = pd.DataFrame(request.scenario_names)
+	unique_scenarios = list(set(request.scenario_names))
+	final_filtered_data = []
+	status: str
+	
+	for scenario in unique_scenarios:
+	
+		filtered_df = predicted_result[predicted_result['predicted_tag_id'] == scenario]
+		if not filtered_df.empty:
+			sample_size = min(request.no_of_records, len(filtered_df))
+			random_records = filtered_df.sample(n=sample_size)
+			final_filtered_data.append(random_records)
+	
+	if final_filtered_data:
+		status = "Success"
+		final_filtered_data = pd.concat(final_filtered_data, ignore_index=True)
+		final_filtered_data.drop(columns=['Series_Latest', 'text_representation], inplace = True)
+		cleaned_final_data = final_filtered_data.replace({np.nan: None, np.inf: None, -np.inf: None})
+		json_data = cleaned_final_data.to_dict(orient="records")
+		return {
+			"Scenario_names": request.scenario_names,
+			"playbook_id": request.playbook_id,
+			"Status": status,
+			"Members": json_data
+		}
+		
+	else:
+		status = "Data not found"
+		return {
+			"Scenario_names": request.scenario_names, 
+			"playbook_id": request.playbook_id,
+			"Status": status
+		}
+if __name__ == "__main__":
+	app.run(host='ip_address', port=9090, debug = True)
+			
+		

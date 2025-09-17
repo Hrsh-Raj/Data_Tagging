@@ -1,0 +1,43 @@
+import torch
+import pandas as pd
+import json
+from transformers import BertTokenizer, BertForSequenceClasification
+
+#Load model and tokenizer
+model_path = 'model_v1'
+tokenizer = BertTokenizer.from_pretrained(model_path)
+model = BertForSequenceClasification.from_pretrained(model_path)
+model.eval()
+
+#Load label mappings
+with open("label_mappings_new.json", "r") as f:
+	mappings = json.load(f)
+id2label = {int(k): v for k, v in mappings["id2label"].items()}
+
+#--- FIX: Load max_length used during training ---
+with  open('model_v1/max_length.txt', 'r') as f: 
+	max_length = int(f.read())	
+
+# Load input data
+input_df = pd.read_excel('queries.xlsx')
+
+# -- Fix: Fallback to use correct text format based on training ----
+if "Query" in input_df.columns:
+	input_df["text_representation"] = input_df{"Query"].astype(str)
+else: 
+	input_df["text_representation"] = input_df.apply(lambda row: " | ".join(f"{col}: {str(row[col])}" for col in row.index), axis =1)
+
+#Prediction function
+def predict_tag(text):
+	inputs = tokenizer(text, return_tensors="pt", truncation = True, padding = "max_length", max_length = 500)
+	with torch.no_grad():
+		outputs = model(**inputs)
+		pred_class_id = torch.argmax(outputs.logits, dim = 1).item()
+	return id2label[pred_class_id]
+
+#Apply predictions
+input_df["predicted_tag_id"] = input_df["text_representation"].apply(predict_tag)
+
+#Save predictions
+input_df.to_excel('predicted_results.xlsx', index = False)
+print("Predictions saved to predicted_results.xlsx")
