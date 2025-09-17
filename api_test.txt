@@ -1,0 +1,128 @@
+import sys
+import pandas as pd
+import pickle 
+from fastapi import FastAPI, HTTPException
+from typing import Dict, List
+from pydantic import BaseModel
+import numpy as np
+import os
+import time
+from sklearn.base import BaseEstimator, TransformerMixin
+
+app = FastAPI(title="ML Data Tagging API", description = "API for Automated Feature Retrieval", version = "1.0")
+
+model_mapping = {
+	"pbp" : {"model": "./claim_models/pbp.pkl"},
+	"eop" : {"model": "./claim_models/EOP.pkl"}
+	}
+	
+def load_model(scenario_id):
+	t1 = time.perf_counter()
+	model_info = model_mapping.get(scenario_id)
+	if not model_info:
+		raise ValueError("Invalid Scenario Name")
+		
+	model_path = model_info["model"]
+	if not os.path.exists(model_path):
+		raise FileNotFoundError("Model file not found!")
+		
+	try:
+		with open(model_path, 'rb') as model_file:
+			model_contents = pickle.load(model_file)
+			
+		if len(model_contents) == 3:
+			pipeline, label_encoders, feature_data = model_contents
+		else:
+			feature_data = model_contents
+			pipeline = None
+			label_encoders = None
+			print("Model and Feature Data Loaded Successfully.")
+	
+	except Exception as e:
+		print(f"Error loading model: {e}")
+		feature_data = None
+		
+	t2 = time.perf_counter()
+	print(f'load model diff: {t2-t1}')
+	return pipeline, label_encoders, feature_data
+	
+class FilterRequest(BaseModel):
+	scenario_name: str
+	scenario_id: str
+	no_of_claims: int
+	filters: Dict[str, List[str]]
+	
+
+@app.post("/retrieve_features")
+def retrieve_features(request: FilterRequest):
+
+	row_limit = request.no_of_claims
+	pipeline, label_encoders, feature_data = load_model(request.scenario_id)
+	
+	if feature_data is None:
+		raise HTTPException(status_code=500, detail="Feature data is not available!")
+		
+	df_input = pd.DataFrame(request.filters)
+	
+	df_input.columns = df_input.columns.str.strip().str.lower().str.replace(r'\s+','_', regex=True)
+	feature_data.columns = feature_data.columns.str.strip().str.lower().str.replace(r'\s+', '_', regex=True)
+	
+	categorical_columns = [col for col in df_input.columns if col in feature_data.columns]
+	if not categorical_columns:
+		raise HTTPException(status_code = 400, detail = "No valid categorical columns found for filtering!")
+		
+	print(f"Found matching categorical columns: {categorical_columns}")
+	
+	unique_combinations = df_input[categorical_columns].drop_duplicates()
+	final_filtered_data = []
+	status: str
+	
+	for _, row in unique_combinations.iterrows():
+		filter_condition = pd.Series(True, index=feature_data.index)
+		
+		for col in categorical_columns:
+			#Debug prints to catch issues
+			print(f"\nComparing columns: '{col}'")
+			print(f"Row value: {repr(row[col])}")
+			print(f"Feature column dtype:{feature_data[col].dtype}")
+			print(f"Row value dtype:{type(row[col])}")
+			print(f"Unique values in feature_data[{col}]:{feature_data[col].unique()}")
+			
+			comparison_result = feature_data[col] == row[col]
+			print(f"Matches found in colm'{col}': {comparision_result.sum()}")
+			
+			#Apply filter
+			filter_condition &= (feature_data[col] == row[col])
+			
+		filtered_subset = feature_data[filter_condition]
+		if not filtered_subset.empty:
+			filtered_subset = filtered_subset.head(row_limit)
+			final_filtered_data.append(filtered_subset)
+			
+	
+	if final_filtered_data:
+		status = "Success"
+		final_filtered_data = pd.concat(final_filtered_data, ignore_index=True)
+		cleaned_final_data = final_filtered_data.replace({np.nan: None, np.inf: None, -np.inf: None})
+		json_data = cleaned_final_data.to_dict(orient="records")
+		return {
+			"Scenario_name": request.scenario_name,
+			"Scenario_id": request.scenario_id,
+			"Status": status, 
+			"Claims": json_data
+			}
+			
+	else:
+		status = "Data not found"
+		return {
+			"Scenario_name": request.scenario_name,
+			"Scenario_id": request.scenario_id,
+			"Status": status
+			}
+			
+			
+if __name__ == "__main__":
+	import uvicorn
+	uvicorn.run("api:app", host"ip_address", port=8000, reload=True)
+		
+	
