@@ -1,0 +1,152 @@
+import pandas as pd
+import torch
+import os
+import json
+
+from sklearn.metrics import accuracy_score
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
+from datasets import Dataset
+from sklearn.model_selection import train_test_split
+import numpy as np
+
+#Set offline mode
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+#Load Training Data
+training_df = pd.read_excel("Template.xlsx").dropna(subset=["Query"])
+training_df["Query"] = training_df["Query"].str.replace("\n", " ").str.strip()
+training_df["Tag ID"] = training_df["Tag ID"].astype("str")
+
+#Create Label mapping
+unique_labels = sorted(training_df['Tag ID'].unique())
+label2id = {label: idx for idx, label in enumerate(unique_labels)}
+id2label = {idx: label for label, idx in label2id.items()}
+training_df['label'] = training_df['Tag ID'].apply(lambda x: label2id[x])
+
+#Load Tokenizer
+model_path = 'Converted_model'
+tokenizer = BertTokenizer.from_pretrained(model_path, local_files_only=True)
+
+#Determine max_length dynamically
+token_lengths = training_df["Query"].apply(lambda x: len(tokenizer.tokenize(x)))
+auto_max_length = token_lengths.sort_values().iloc[int(0.95 * len(token_lengths))]
+
+#Save max_length
+os.makedirs("model_v1', exist_ok = True)
+with open('model_v1'/max-length.txt', 'w') as f:
+	f.write(str(auto_max_length))
+	
+#Tokenize phase 1 dataset
+train_dataset = Dataset.from_pandas(training_df[['Query', 'label']])
+train_dataset = train_dataset.map(lambda e: tokenizer(e['Query'], truncation=True, padding='max_length', max_length=auto_max_length), batched=True)
+train_dataset.set_format(type='torch', columns= ['input_ids', 'attention_mask', 'label'])
+
+
+#Load model
+model = BertForSequenceClassification.from_pretrained(model_path, num_labels=len(unique_labels), local_files_only=True)
+
+#Training Arguments
+training_args = TrainingArguments(
+	output_dir = "./results_new",
+	per_device_train_batch_size=4,
+	num_train_epochs=7,
+	save_strategy ="no",
+	load_best_model_at_end = True,
+	save_total_limit = 1,
+	metric_for_best_model = "eval_accuracy",
+	greater_is_better = True,
+	report_to = "none",
+	logging_steps =100,
+	learning_rate = 2e-5,
+	weight_decay =0.01,
+	fp16 =True,
+	gradient_checkpointing = True,
+)
+
+#Train phase 1(No evaluation here)
+trainer = Trainer(model = model, args=training_args, train_dataset = train_dataset,)
+trainer.train()
+
+
+
+
+
+#Save model after phase 1
+model.save_pretrained('model_v1')
+tokenizer.save_pretrained(model_v1')
+with open('label_mappings_new.json', 'w') as f:
+	json.dump({'label2id': label2id, 'id2label': id2label}, f)
+	
+
+# --- Phase 2 - Train on structured text with validation split and accuracy ---
+try:
+	df_results = pd.read_excel('query_results_labeled.xlsx')
+	df_results['text'] = df_results.apply( lambda row: "; ".join([f"{col}: {row[col]}" for col in row.index if col != "Tag_ID"]), axis =1)
+	df_results["label"] = df_results["Tag_ID"].map(label2id)
+	df_results = df_results.dropna(subset=["label"])
+	df_results["label"] = df_results["label"].astype(int)
+	
+	
+	#Split into train and validation (80% train, 20% validation)
+	train_texts, val_texts, train_labels, val_labels = train_test_split( df_results["text"].tolist(),df_results["label"].tolist(), test_size=0.2, random_state=42, stratify = df_results["label"] )
+	
+	
+	
+	
+	
+	
+	
+	#Tokenize
+	train_dataset_results = Dataset.from_dict({ "text": train_texts, "label": train_labels}).map(lambda e: tokenizer(e['text'], truncation = True, padding = 'max_length', max_length =512), batched = True)
+	
+	
+	
+	
+	
+	val_dataset_results = Dataset.from_dict({ "text": val_texts, "label": val_labels}).map(lambda e: tokenizer(e['text'], truncation = True, padding = 'max_length', max_length =512), batched = True)
+	
+	
+	
+	
+	
+	train_dataset_results.set_format(type='torch', columns = ['input_ids', 'attention_mask', 'label'])
+	val_dataset_results.set_format(type='torch', columns = ['input_ids', 'attention_mask', 'label'])
+	
+	
+	def compute_metrics(eval_pred):
+		logits, labels = eval_pred
+		if logits is None or labels is None: raise ValueError("Logits and labels must not be None.")
+		logits = np.array(logits)
+		labels = np.array(labels)
+		if logits.shape[0] != labels.shape[0] : raise ValueError (f"Shape mismatch: logits has {logits.shape[0]} samples, but labels has {labels.shape[0]}")
+		if logits.size == 0 or labels.size == 0: raise ValueError ("Logits and labels must not be empty")
+		preds = np.argmax(logits, axis=1)
+		accuracy = accuracy_score(labels, preds)
+		print(f"labels : {labels})
+		print(f"predictions : {preds}")
+		return {"accuracy": accuracy}
+		
+		
+	#New trainer with evaluation
+	trainer = Trainer( model=model, args=training_args, train_dataset=train_dataset_results, eval_dataset=val_dataset_results, compute_metrics=compute_metrics)
+	trainer.train()
+	
+	
+	
+	
+	
+	
+	
+	eval_result = trainer.evaluate()
+	final_accuracy = eval_result.get("eval_accuracy", None)
+	if final_accuracy is not None:
+		print(f"Final Validation acccuracy :{final_accuracy * 100:.2f}%")
+	else:
+		print("Accuracy not found")
+	
+	#Save final model
+	model.save_pretrained("model_v1")
+	tokenizer.save_pretrained("model_v1")
+	
+except FileNotFoundError:
+	print("query_results_labeled.xlsx not found - skipping phase 2 training.")
